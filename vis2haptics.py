@@ -103,7 +103,7 @@ D_leader[np.ix_([4, 5], [4, 5])] = 0.6 * D_leader[np.ix_([4, 5], [4, 5])]
 
 #----------------------------------------------------------------
 # This is the gain of the AI guidance 
-kAI = 0.005
+kAI = 0.015
 # kAI = 0.0
 # ----------------------------------------------------------------
 
@@ -129,6 +129,11 @@ rtde_c_leader.moveJ(q0_follower, 0.5, 0.5)
 # read the leader's joint variables
 q0_leader = np.array(rtde_r_leader.getActualQ())
 
+
+# Static pose of the tip wrt the wrist
+p_wt = np.array([0, 0, 0.53])
+R_wt = np.identity(3)
+
 # Get pose of the leader's wrist  
 g_leader = robot_l.fkine(q0_leader)
 R_leader = np.array(g_leader.R)
@@ -140,21 +145,33 @@ print('p: ', p_leader)
 # Get pose of the follower's wrist 
 g_follower = robot_l.fkine(q0_follower)
 R_follower = np.array(g_follower.R)
+Rt_follower = R_follower @ R_wt
 p_follower = np.array(g_follower.t)
+pt_follower = p_follower + R_follower @ p_wt
 print('----------Follower:')
 print('R: ', R_follower)
 print('p: ', p_follower)
+print('pt: ', pt_follower)
 
 # Initialize logging data -----------
 pl_log = p_leader
 pf_log = p_follower
+ptf_log = pt_follower
 Ql_log = rot2quat(R_leader) # Quaternion format
 Qf_log = rot2quat(R_follower) # Quaternion format
+Qtf_log = rot2quat(Rt_follower) # Quaternion format
 def_log = np.zeros(2) # Deformation
 Fh_log = np.zeros(6) # Force applied by human
 uf_log = np.zeros(6) # Torques on the joints by the human
 Fv_log = np.zeros(6) # Virtual force applied by the AI guidance
 
+# The position of the tip of the PHRI tool (leader) wrt the wrist
+p_w_phri = np.array([0, 0, 0.13])
+
+# The initial difference in position between the leader and the follower robot
+pd_lf = pt_follower - (p_leader + R_leader @ p_w_phri)
+print("pd_lf:")
+print(pd_lf)
 
 # This variable is used to communicate to the UR3 every 8ms 
 k_follower = 0
@@ -186,9 +203,10 @@ L_dot = 0.0
 a_tank = 0.9
 
 # This is the gain for the trajectory tracking of the follower robot 
-k_traj = 4.00
+k_traj = 4.0
 # initialize the pose error 
 e = np.zeros(6)
+
 
 # initialize the deformation variable in the pizel space
 d_thres = np.zeros(2)
@@ -221,7 +239,10 @@ for i in range(50000):
     # Calculate the pose of the follower's wrist
     g_follower = robot_l.fkine(q_follower)
     R_follower = np.array(g_follower.R)
+    Rt_follower = R_follower @ R_wt
     p_follower = np.array(g_follower.t)
+    pt_follower = p_follower + R_follower @ p_wt
+
 
     # This is the z axis of the leader
     # wrt the base frame
@@ -245,12 +266,16 @@ for i in range(50000):
         # The virtual force provided by the DCNN wrt the Camera frame 
         cFd = - np.array([d_thres[0], d_thres[1], 0])
 
-        # Chnage the frame of reference to base frame 
+        # Change the frame of reference to base frame 
         wFd = Rwc @ cFd
 
+
         # Gamma matrix (rigid object)
+        # Modification: TIP !!!
         Fext[:3] = wFd
-        Fext[-3:] = skewSymmetric( z * dtool) @ wFd
+        # Fext[:3] = np.zeros(3)
+        Fext[-3:] = skewSymmetric( (dtool -0.53) * z ) @ wFd
+        # print(Fext)
 
     # print(time.time() - t_now)
     # t_now =  time.time()
@@ -298,9 +323,10 @@ for i in range(50000):
   
     # Compute the velocity of the leader's wrist 
     v_leader = J_leader @ qdot_leader
+    v_leader[:3] = v_leader[:3] - skewSymmetric(R_leader @ p_w_phri) @ v_leader[-3:]
 
-    # Compute the pose error between the follower and the leader pose 
-    e[:3] = p_leader - p_follower
+    # Modified: TIP ....Compute the pose error between the follower and the leader pose
+    e[:3] = p_leader + R_leader @ p_w_phri  + pd_lf - pt_follower
     e[-3:] = logError(R_leader, R_follower)
 
     #  Integrate the joint veloities of the leader (admittance control)
@@ -320,7 +346,14 @@ for i in range(50000):
     L_dot = a_tank * v_0_wrist @ (D_leader @ v_0_wrist) - kAI * s * (v_w_wrist @ Fext)
   
     # The torque applied due to the virtual force from the DCNN ... for guidance (Vis2Haptics)
-    uf = kAI * s * np.transpose(Je_leader) @ Fext
+    Fv = np.zeros(6)
+    # print("Fext")
+    # print(Fext)
+    Fv[:3] = Fext[:3]
+    Fv[-3:] = skewSymmetric(p_w_phri) @ Fext[:3] + Fext[-3:]
+    # print("Fv")
+    # print(Fv)
+    uf = kAI * s * np.transpose(Je_leader) @ Fv
 
     # Admittance control model 
     tau_leader =  0.7 * np.transpose( J_leader) @ f_leader + uf
@@ -331,7 +364,8 @@ for i in range(50000):
 
     # Log variables
     pl_log = np.vstack((pl_log, p_leader))
-    pf_log = np.vstack((pl_log, p_follower))
+    pf_log = np.vstack((pf_log, p_follower))
+    ptf_log = np.vstack((ptf_log, pt_follower))
     Ql_log = np.vstack((Ql_log, rot2quat(R_leader)))
     Qf_log = np.vstack((Qf_log, rot2quat(R_follower)))
     if d_thres is not None:
@@ -353,10 +387,15 @@ for i in range(50000):
     if k_follower == 4:
 
         # CLIK
-        qdot_follower = np.linalg.pinv(J_follower) @ (v_leader + k_traj * e)
+        vd_leader_tip = (v_leader + k_traj * e)
+        vd_leader_wrist = np.zeros(6)
+        vd_leader_wrist[:3] = vd_leader_tip[:3] + skewSymmetric(R_follower @ p_wt) @ vd_leader_tip[-3:]
+        vd_leader_wrist[-3:] = vd_leader_tip[-3:]
+
+        qdot_follower = np.linalg.pinv(J_follower) @ vd_leader_wrist
     
         # Set joint velocity of the follower robot 
-        rtde_c_follower.speedJ(qdot_follower, 0.5, 4.0 * dt)
+        rtde_c_follower.speedJ(qdot_follower, 1.0, 4.0 * dt)
 
         k_follower = 0
 

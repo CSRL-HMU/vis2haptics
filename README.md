@@ -5,7 +5,7 @@ This code implements the Vision-to-haptics control scheme for DCNN-based guidanc
 The DCNN was developed utilizing the Pytorch library. The implementation of the network is based on the template provided by the following GitHub repository: [pytorch_image_regession](https://github.com/hugohadfield/pytorch_image_regession).
 
 <p align="center">
-  <img src="./doc/problem_desc.png" height="175" />
+  <img src="./doc/problem_desc.png" height="250" />
 </p>
 
 
